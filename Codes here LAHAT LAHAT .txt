@@ -1,0 +1,543 @@
+using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using Microsoft.Xna.Framework.Input;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace ShootOutGame
+{
+    public class Game1 : Game
+    {
+        private static Game1 _instance;
+        public static Game1 Instance => _instance;
+        private GraphicsDeviceManager _graphics;
+        private SpriteBatch _spriteBatch;
+        private SpriteFont _font;
+
+        internal Texture2D _p1Tex, _p2Tex, _bulletTex, _obstacleTex, _bossTex, _white;
+        private readonly List<Star> _stars = new();
+
+        /* ========== game objects ========== */
+        private readonly Player _p1, _p2;
+        private readonly List<Obstacle> _obstacles = new();
+        private Boss _boss; // null until level 5
+
+        private int _level = 1;
+        private bool _roundOver;
+        private string _winnerText = string.Empty;
+        private int _p1Score = 0, _p2Score = 0;
+
+        public Game1()
+        {
+            _instance = this;     
+            _graphics = new GraphicsDeviceManager(this)
+            {
+                PreferredBackBufferWidth = 800,
+                PreferredBackBufferHeight = 600
+            };
+            Content.RootDirectory = "Content";
+
+            _p1 = new Player(Keys.A, Keys.D, Keys.Space, 350, 550, -1);
+            _p2 = new Player(Keys.Left, Keys.Right, Keys.Enter, 350, 50, 1);
+        }
+
+        protected override void LoadContent()
+        {
+            _spriteBatch = new SpriteBatch(GraphicsDevice);
+            _font = Content.Load<SpriteFont>("Arial");
+
+            _p1Tex = Content.Load<Texture2D>("player");
+            _p2Tex = Content.Load<Texture2D>("player2");
+            _bulletTex = Content.Load<Texture2D>("bullet");
+            _obstacleTex = Content.Load<Texture2D>("obstacle");
+            _bossTex = Content.Load<Texture2D>("boss");
+            _white = new Texture2D(GraphicsDevice, 1, 1);
+            _white.SetData(new[] { Color.White });
+
+            LoadLevel(_level);
+            CreateStars(120);
+        }
+
+        private void CreateStars(int count)
+        {
+            var rnd = new Random();
+            for (int i = 0; i < count; i++)
+                _stars.Add(new Star(_white,
+                    new Vector2(rnd.Next(800), rnd.Next(600)),
+                    rnd.Next(20, 100)));
+        }
+
+        private void LoadLevel(int lvl)
+        {
+            _obstacles.Clear();
+            _boss = null;
+
+            if (lvl == 5)               // boss level
+            {
+                _boss = new Boss(300, 100);
+                _boss.LoadContent(_bossTex, _bulletTex, GraphicsDevice);
+            }
+            else                        // normal level
+            {
+                int count = 3 + (lvl - 1) * 2;   // 3,5,7,9
+                var rnd = new Random();
+                for (int i = 0; i < count; i++)
+                    _obstacles.Add(new Obstacle(
+                        rnd.Next(50, 750),
+                        rnd.Next(120, 480),
+                        rnd.Next(-120, 120),
+                        rnd.Next(-120, 120)));
+            }
+
+            _p1.LoadContent(_p1Tex, _bulletTex, GraphicsDevice);
+            _p2.LoadContent(_p2Tex, _bulletTex, GraphicsDevice);
+            foreach (var o in _obstacles) o.LoadContent(_obstacleTex, GraphicsDevice);
+        }
+
+        protected override void Update(GameTime gt)
+        {
+            if (Keyboard.GetState().IsKeyDown(Keys.Escape)) Exit();
+            if (_roundOver)
+            {
+                var ks = Keyboard.GetState();
+
+                if (_level < 5 && ks.IsKeyDown(Keys.R))
+                {
+                    _level++;
+                    ResetRound();
+                }
+                else if (_level == 5 && ks.IsKeyDown(Keys.F)) // restart game
+                {
+                    _level = 1;
+                    _p1Score = 0;
+                    _p2Score = 0;
+                    ResetRound();
+                }
+
+                return;
+            }
+
+            // background 
+            foreach (var s in _stars) s.Update(gt);
+
+            // players 
+            _p1.Update(gt, GraphicsDevice.Viewport.Bounds);
+            _p2.Update(gt, GraphicsDevice.Viewport.Bounds);
+
+            // obstacles 
+            var bounds = GraphicsDevice.Viewport.Bounds;
+            foreach (var o in _obstacles) o.Update(gt, bounds);
+
+            // boss
+            _boss?.Update(gt, bounds, _p1, _p2);
+
+            // collisions 
+            HandleCollisions();
+
+            // win/lose check 
+            bool defeat = _p1.Life <= 0 || _p2.Life <= 0;
+            bool bossDead = _boss != null && _boss.HP <= 0;
+            if (defeat || bossDead)
+            {
+                _winnerText = defeat ? (_p1.Life <= 0 ? "PLAYER 2 WINS!" : "PLAYER 1 WINS!")
+                                     : "BOSS DEFEATED!";
+                _roundOver = true;
+            }
+        }
+
+        private void HandleCollisions()
+        {
+            /* player bullets vs obstacles / boss */
+            void CheckBullet(Player shooter)
+            {
+                if (shooter.Bullet?.Active != true) return;
+
+                foreach (var o in _obstacles)
+                    if (shooter.Bullet.Bounds.Intersects(o.Bounds))
+                    { shooter.Bullet.Active = false; return; }
+
+                if (_boss != null && shooter.Bullet.Bounds.Intersects(_boss.Bounds))
+                {
+                    _boss.HP -= 5;
+                    shooter.Bullet.Active = false;
+                }
+            }
+
+            CheckBullet(_p1);
+            CheckBullet(_p2);
+
+            /* boss bullets vs players */
+            foreach (var b in _boss?.Bullets ?? new List<Bullet>())
+            {
+                if (!b.Active) continue;
+                if (b.Bounds.Intersects(_p1.Bounds)) { _p1.Life -= 5; b.Active = false; }
+                if (b.Bounds.Intersects(_p2.Bounds)) { _p2.Life -= 5; b.Active = false; }
+            }
+
+            /* player bullets vs opponent */
+            if (_boss == null)
+            {
+                if (_p1.Bullet?.Active == true && _p1.Bullet.Bounds.Intersects(_p2.Bounds))
+                {
+                    _p2.Life -= 5;
+                    _p2._hitFlash = 0.2f;
+                    _p1Score++;                 
+                    _p1.Bullet.Active = false;
+                }
+                if (_p2.Bullet?.Active == true && _p2.Bullet.Bounds.Intersects(_p1.Bounds))
+                {
+                    _p1.Life -= 5;
+                    _p1._hitFlash = 0.2f;
+                    _p2Score++;                 
+                    _p2.Bullet.Active = false;
+                }
+            }
+            // boss hits 
+            if (_boss != null)
+            {
+                if (_p1.Bullet?.Active == true && _p1.Bullet.Bounds.Intersects(_boss.Bounds))
+                {
+                    _boss.HP -= 5;
+                    _boss._hitFlash = 0.2f;
+                    _p1Score++;                 
+                    _p1.Bullet.Active = false;
+                    if (_boss.HP <= 0) _winnerText = "PLAYER 1 WINS FINAL!";
+                }
+                if (_p2.Bullet?.Active == true && _p2.Bullet.Bounds.Intersects(_boss.Bounds))
+                {
+                    _boss.HP -= 5;
+                    _boss._hitFlash = 0.2f;
+                    _p2Score++;                 
+                    _p2.Bullet.Active = false;
+                    if (_boss.HP <= 0) _winnerText = "PLAYER 2 WINS FINAL!";
+                }
+            }
+        }
+
+        private void ResetRound()
+        {
+            _p1.Reset();
+            _p2.Reset();
+            _roundOver = false;
+            LoadLevel(_level);
+        }
+
+        /* ---------- DRAW ---------- */
+        protected override void Draw(GameTime gt)
+        {
+            GraphicsDevice.Clear(Color.Black);
+
+            _spriteBatch.Begin();
+
+            if (_boss != null)
+            {
+                Vector2 hpPos = new Vector2(
+                    400 - _font.MeasureString($"BOSS HP: {_boss.HP}").X * 1.5f / 2f, 5);
+                _spriteBatch.DrawString(_font, $"BOSS {_boss.HP}",
+                    hpPos, Color.DarkRed, 0, Vector2.Zero, 1.5f, SpriteEffects.None, 0);
+            }
+            foreach (var s in _stars) s.Draw(_spriteBatch);
+            // players 
+            _p1.Draw(_spriteBatch, _font);
+            _p2.Draw(_spriteBatch, _font);
+            // obstacles / boss 
+            foreach (var o in _obstacles) o.Draw(_spriteBatch);
+            _boss?.Draw(_spriteBatch, _font);
+
+            // UI 
+            Vector2 hp1Pos = new Vector2(10, 540);
+            Vector2 hp2Pos = new Vector2(650, 30);
+            Vector2 pts1Pos = new Vector2(10, 570);
+            Vector2 pts2Pos = new Vector2(650, 60);
+            _spriteBatch.DrawString(_font, $"P1 Hp:  {(_p1.Life)}",
+                hp1Pos, Color.LimeGreen, 0, Vector2.Zero, 1.5f, SpriteEffects.None, 0);
+            _spriteBatch.DrawString(_font, $"Pts {_p1Score}",
+                pts1Pos, Color.White);
+            _spriteBatch.DrawString(_font, $"P2 Hp:  {(_p2.Life)}",
+                hp2Pos, Color.LimeGreen, 0, Vector2.Zero, 1.5f, SpriteEffects.None, 0);
+            _spriteBatch.DrawString(_font, $"Pts {_p2Score}",
+                pts2Pos, Color.White);
+
+            _spriteBatch.DrawString(_font, $"LEVEL {_level}",
+                new Vector2(MathHelper.Clamp(10, 0,
+                    800 - _font.MeasureString($"LEVEL {_level}").X * 1.5f), 30),
+                Color.White, 0, Vector2.Zero, 1.5f, SpriteEffects.None, 0);
+            
+            if (_roundOver)
+            {
+                var size = _font.MeasureString(_winnerText);
+                _spriteBatch.DrawString(_font, _winnerText,
+                    new Vector2(400 - size.X / 2, 300 - size.Y / 2),
+                    Color.Red, 0, Vector2.Zero, 1.5f, SpriteEffects.None, 0);
+
+                string prompt = _level == 5
+    ? "Press F to Restart"
+    : "Press R for Next Level";
+                size = _font.MeasureString(prompt);
+                _spriteBatch.DrawString(_font, prompt,
+                    new Vector2(400 - size.X / 2, 350), Color.Yellow);
+            }
+            _spriteBatch.End();
+            base.Draw(gt);
+        }
+    }
+
+    /* ================================================================ */
+    /*                             STARS                                */
+    /* ================================================================ */
+    internal sealed class Star
+    {
+        private readonly Texture2D _tex;
+        private Vector2 _pos;
+        private readonly float _speed;
+        public Star(Texture2D tex, Vector2 pos, float speed)
+        {
+            _tex = tex;
+            _pos = pos;
+            _speed = speed;
+        }
+        public void Update(GameTime gt)
+        {
+            _pos.Y += _speed * (float)gt.ElapsedGameTime.TotalSeconds;
+            if (_pos.Y > 600) _pos.Y = -8;
+        }
+        public void Draw(SpriteBatch sb) =>
+            sb.Draw(_tex, _pos, null, Color.White * 0.5f, 0, Vector2.Zero, 2, SpriteEffects.None, 0);
+    }
+
+    /* ================================================================ */
+    /*                             PLAYER                               */
+    /* ================================================================ */
+    internal sealed class Player
+    {
+        public int Life { get; set; } = 30;
+        public Bullet Bullet { get; private set; }
+        public Rectangle Bounds => new((int)_pos.X, (int)_pos.Y, 60, 20);
+        private readonly Keys _left, _right, _shoot;
+        private Vector2 _pos;
+        private readonly int _dir;
+        private Texture2D _playerTex, _bulletTex;
+        private GraphicsDevice _gd;
+        public float _hitFlash;
+
+        public Player(Keys left, Keys right, Keys shoot, float x, float y, int dir)
+        {
+            _left = left;
+            _right = right;
+            _shoot = shoot;
+            _pos = new Vector2(x, y);
+            _dir = dir;
+        }
+
+        public void LoadContent(Texture2D playerTex, Texture2D bulletTex, GraphicsDevice gd)
+        {
+            _playerTex = playerTex;
+            _bulletTex = bulletTex;
+            _gd = gd;
+        }
+
+        public void Update(GameTime gt, Rectangle screen)
+        {
+            var ks = Keyboard.GetState();
+            float speed = 250f * (float)gt.ElapsedGameTime.TotalSeconds;
+            if (ks.IsKeyDown(_left)) _pos.X = MathHelper.Clamp(_pos.X - speed, 0, screen.Width - 60);
+            if (ks.IsKeyDown(_right)) _pos.X = MathHelper.Clamp(_pos.X + speed, 0, screen.Width - 60);
+            if (ks.IsKeyDown(_shoot) && (Bullet == null || !Bullet.Active))
+            {
+                var bulletPos = _pos + new Vector2(30 - 4, _dir == -1 ? -8 : 20);
+                Bullet = new Bullet(bulletPos, new Vector2(0, _dir * 400));
+                Bullet.LoadContent(_bulletTex, _gd);
+            }
+            Bullet?.Update(gt, screen);
+            _hitFlash -= (float)gt.ElapsedGameTime.TotalSeconds;
+            if (_hitFlash < 0) _hitFlash = 0;
+        }
+        public void Reset()
+        {
+            Life = 30;
+            Bullet = null;
+        }
+
+        public void Draw(SpriteBatch sb, SpriteFont font)
+        {
+            Color tint = _hitFlash > 0 ? Color.Red : Color.White;
+            sb.Draw(_playerTex, Bounds, null, tint);
+
+            int barWidth = 60;
+            int barHeight = 6;
+            Color barColor = (_dir == -1) ? Color.Red : Color.Blue;
+
+            Vector2 barPos = (_dir == -1)
+                ? new Vector2(Bounds.X, Bounds.Y + Bounds.Height + 2)  
+                : new Vector2(Bounds.X, Bounds.Y - barHeight - 2);      
+
+            Rectangle back = new Rectangle((int)barPos.X, (int)barPos.Y, barWidth, barHeight);
+            Rectangle fill = new Rectangle((int)barPos.X, (int)barPos.Y,
+                                           (int)(barWidth * MathHelper.Clamp(Life / 30f, 0, 1)), barHeight);
+            sb.Draw(Game1.Instance._white, back, Color.Black);
+            sb.Draw(Game1.Instance._white, fill, barColor);
+            Bullet?.Draw(sb);
+        }
+    }
+
+    /* ================================================================ */
+    /*                             BULLET                               */
+    /* ================================================================ */
+    internal sealed class Bullet
+    {
+        public bool Active { get; set; } = true;
+        public Rectangle Bounds => new((int)_pos.X, (int)_pos.Y, 8, 8);
+        private Vector2 _pos;
+        private Vector2 _vel;
+        private Texture2D _tex;
+        private Color _color = Color.Yellow;
+        public Bullet(Vector2 pos, Vector2 vel, Color? color = null)
+        {
+            _pos = pos;
+            _vel = vel;
+            _color = color ?? Color.Yellow;
+        }
+        public void LoadContent(Texture2D tex, GraphicsDevice gd) => _tex = tex;
+
+        public void Update(GameTime gt, Rectangle screen)
+        {
+            _pos += _vel * (float)gt.ElapsedGameTime.TotalSeconds;
+            if (_pos.Y < -8 || _pos.Y > screen.Height + 8) Active = false;
+        }
+        public void Draw(SpriteBatch sb) => sb.Draw(_tex, Bounds, _color);
+    }
+
+    /* ================================================================ */
+    /*                             OBSTACLE                             */
+    /* ================================================================ */
+    internal sealed class Obstacle
+    {
+        public Rectangle Bounds => new((int)_pos.X, (int)_pos.Y, 40, 40);
+        private Vector2 _pos, _vel;
+        private Texture2D _tex;
+
+        public Obstacle(float x, float y, float vx, float vy)
+        {
+            _pos = new Vector2(x, y);
+            _vel = new Vector2(vx, vy);
+        }
+        public void LoadContent(Texture2D tex, GraphicsDevice gd) => _tex = tex;
+
+        public void Update(GameTime gt, Rectangle screen)
+        {
+            _pos += _vel * (float)gt.ElapsedGameTime.TotalSeconds;
+
+            if (_pos.X < 0 || _pos.X + 40 > screen.Width) _vel.X *= -1;
+            if (_pos.Y < 0 || _pos.Y + 40 > screen.Height) _vel.Y *= -1;
+        }
+        public void Draw(SpriteBatch sb) => sb.Draw(_tex, Bounds, Color.Gray);
+    }
+
+    /* ================================================================ */
+    /*                             BOSS                                 */
+    /* ================================================================ */
+    internal sealed class Boss
+    {
+        public int HP { get; set; } = 100;
+        public Rectangle Bounds => new((int)_pos.X, (int)_pos.Y, 200, 40);
+        public List<Bullet> Bullets { get; } = new();
+        private Vector2 _pos;
+        private Vector2 _vel = new(150, 0);
+        private Texture2D _tex, _bulletTex;
+        private GraphicsDevice _gd;
+        private float _shootTimer;
+        private float _spreadTimer;
+        public float _hitFlash;
+
+        public Boss(float x, float y)
+        {
+            _pos = new Vector2(x, y);
+            _vel = new Vector2(200, 120);
+        }
+
+        public void LoadContent(Texture2D tex, Texture2D bulletTex, GraphicsDevice gd)
+        {
+            _tex = tex;
+            _bulletTex = bulletTex;
+            _gd = gd;
+        }
+
+        public void Update(GameTime gt, Rectangle screen, Player p1, Player p2)
+        {
+            // patrol 
+            _pos.X += _vel.X * (float)gt.ElapsedGameTime.TotalSeconds;
+            if (_pos.X < 0 || _pos.X + 200 > screen.Width) _vel.X *= -1;
+            _pos += _vel * (float)gt.ElapsedGameTime.TotalSeconds;
+            if (_pos.X < 0 || _pos.X + 200 > screen.Width) _vel.X *= -1;
+            if (_pos.Y < 0 || _pos.Y + 40 > screen.Height) _vel.Y *= -1;
+            // boss shooting 
+            _shootTimer += (float)gt.ElapsedGameTime.TotalSeconds;
+
+            if (_shootTimer >= 0.8f)           // fire every 0.8 s
+            {
+                // choose random horizontal target
+                var rnd = new Random();
+                int targetX = rnd.Next(50, 750);
+                Vector2 laserStart = _pos + new Vector2(100 - 4, 40);
+                Vector2 dir = new Vector2(targetX - laserStart.X, 400).Normalized();
+                Bullets.Add(new Bullet(laserStart, Vector2.UnitY * 800, Color.Red));    // down
+                Bullets.Add(new Bullet(laserStart, -Vector2.UnitY * 800, Color.Red));   // up
+                foreach (var b in Bullets.Skip(Math.Max(0, Bullets.Count - 3)))
+                    b.LoadContent(_bulletTex, _gd);
+                _shootTimer = 0;
+            }
+
+            _spreadTimer += (float)gt.ElapsedGameTime.TotalSeconds;
+            if (_spreadTimer >= 1.2f)
+            {
+                // downward spread
+                for (int dx = -1; dx <= 1; dx++)
+                    Bullets.Add(new Bullet(_pos + new Vector2(100 - 4, 40),
+                                            new Vector2(dx * 120, 400), Color.Red));
+
+                // upward spread
+                for (int dx = -1; dx <= 1; dx++)
+                    Bullets.Add(new Bullet(_pos + new Vector2(100 - 4, 0),
+                                            new Vector2(dx * 120, -400), Color.Red));
+
+                foreach (var b in Bullets.Skip(Math.Max(0, Bullets.Count - 7)))
+                    b.LoadContent(_bulletTex, _gd);
+
+                _spreadTimer = 0;
+            }
+            foreach (var b in Bullets) b.Update(gt, screen);
+            Bullets.RemoveAll(b => !b.Active);
+
+            _hitFlash -= (float)gt.ElapsedGameTime.TotalSeconds;
+            if (_hitFlash < 0) _hitFlash = 0;
+        }
+
+        public void Draw(SpriteBatch sb, SpriteFont font)
+        {
+            Color tint = _hitFlash > 0 ? Color.Red : Color.White;
+            sb.Draw(_tex, Bounds, null, tint);
+
+       
+            Rectangle barBack = new(Bounds.X, Bounds.Y - 12, 200, 8);
+            Rectangle barFill = new(Bounds.X, Bounds.Y - 12,
+                                    (int)(200 * MathHelper.Clamp(HP / 100f, 0, 1)), 8);
+            sb.Draw(Game1.Instance._white, barBack, Color.Black);
+            sb.Draw(Game1.Instance._white, barFill, Color.DarkRed);
+
+            
+            foreach (var b in Bullets) b.Draw(sb);
+        }
+    }
+    
+    public static class Vector2Extensions
+    {
+        public static Vector2 Normalized(this Vector2 vector)
+        {
+            if (vector == Vector2.Zero)
+                return Vector2.Zero;
+
+            return Vector2.Multiply(vector, 1 / vector.Length());
+        }
+    }
+}
